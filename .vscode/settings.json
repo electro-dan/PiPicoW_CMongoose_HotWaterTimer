@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "*.aspx": "html",
+        "cstdlib": "c",
+        "random": "c",
+        "cstdint": "c"
+    }
+}
