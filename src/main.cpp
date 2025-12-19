@@ -22,6 +22,7 @@ Add flash save / load
 #include "hardware/rtc.h"
 
 #include "mongoose.h"
+#include "main.h"
 
 #define HTTP_URL "http://0.0.0.0:80"
 
@@ -48,9 +49,11 @@ void main_setconfig(void *data) {
  * @param arg
  */
 static void blink_timer(void *arg) {
-  	(void) arg;
+  	//(void) arg;
   	cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, !cyw43_arch_gpio_get(CYW43_WL_GPIO_LED_PIN));
+}
 
+static void ws_timer(void *arg) {
 	// Get the RTC date and time
 	datetime_t dt;
 	rtc_get_datetime(&dt);
@@ -61,6 +64,20 @@ static void blink_timer(void *arg) {
 			dt.hour,
 			dt.min,
 			dt.sec));*/
+
+	struct mg_mgr *mgr = (struct mg_mgr *) arg;
+	struct mg_connection *c;
+	for (c = mgr->conns; c != NULL; c = c->next) {
+		if (c->data[0] != 'W') continue;
+		mg_ws_printf(c, WEBSOCKET_OP_TEXT, "{\"status\": \"OK\","
+            		"\"current_day\": %d,"
+            		"\"current_time\": %d,"
+            		"\"heating_state\": 1,"
+            		"\"is_heating\": 1,"
+            		"\"boost_timer_countdown\": 0,"
+            		"\"timers\": [[127, 450, 390],[0, 420, 420],[0, 420, 420],[0, 420, 420],[0, 420, 420],[0, 420, 420]]"
+					"}\n", day_of_week(&dt), dt.hour * 60 + dt.min);
+	}
 }
 
 // SNTP client callback
@@ -123,8 +140,61 @@ static void sntp_timer(void *arg) {
 	sntp_refresh_counter++;
 }
 
+/***
+ * Main event callback handler for Mongoose
+ * @param c
+ * @param ev
+ * @param ev_data
+ */
+static void http_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
+	if (ev == MG_EV_HTTP_MSG){
+		struct mg_http_message *hm = (struct mg_http_message *) ev_data;  // Parsed HTTP request
+		if (mg_match(hm->uri, mg_str("/websocket"), NULL)) {
+			// Upgrade to websocket. From now on, a connection is a full-duplex
+			// Websocket connection, which will receive MG_EV_WS_MSG events.
+			mg_ws_upgrade(c, hm, NULL);
+			// Set some unique mark on the connection
+			c->data[0] = 'W';
+		} else if (mg_match(hm->uri, mg_str("/api"), NULL)) {
+			char *str_action = mg_json_get_str(hm->body, "$.action");
+			
+			if (strcmp(str_action, "get_status") == 0) {
+				MG_INFO(("Getting status"));
+				datetime_t dt;
+				rtc_get_datetime(&dt);
+				mg_http_reply(c, 200, "Content-Type: application/json\r\n", 
+					"{\"status\": \"OK\","
+            		"\"current_day\": %d,"
+            		"\"current_time\": %d,"
+            		"\"heating_state\": 1,"
+            		"\"is_heating\": 1,"
+            		"\"boost_timer_countdown\": 0,"
+            		"\"timers\": [[127, 450, 390],[0, 420, 420],[0, 420, 420],[0, 420, 420],[0, 420, 420],[0, 420, 420]]"
+					"}\n", 
+					day_of_week(&dt), dt.hour * 60 + dt.min);
+			} else {
+				mg_http_reply(c, 400, "", "{\"status\": \"ERROR\", \"message\": \"Unkown action\"}\n", 123);
+				MG_INFO(("Unknown action"));
+			}
+			
+			mg_free(str_action);
+		} else {
+			MG_INFO(("Got: %s", hm->uri));
+			struct mg_http_serve_opts opts = {
+				.root_dir = "/web",
+				.fs = &mg_fs_packed
+			 };
+			mg_http_serve_dir(c, hm, &opts);
+		}
+	/*} else if (ev == MG_EV_WS_MSG) {
+		// Got websocket frame. Received data is wm->data. Echo it back!
+		struct mg_ws_message *wm = (struct mg_ws_message *) ev_data;
+		mg_ws_send(c, wm->data.buf, wm->data.len, WEBSOCKET_OP_TEXT);*/
+	}
+}
+
 // https://forums.raspberrypi.com/viewtopic.php?t=312419
-uint8_t sys_dayOfWeek(datetime_t *dt) {
+uint8_t day_of_week(datetime_t *dt) {
     uint8_t day = dt->day; 
     uint8_t month = dt->month; 
     uint16_t year = dt->year;
@@ -141,74 +211,6 @@ uint8_t sys_dayOfWeek(datetime_t *dt) {
 
     // Zeller's congruence
     return (c / 4 - 2 * c + year + year / 4 + 13 * (month + 1) / 5 + day - 1) % 7;
-}
-
-/***
- * Main event callback handler for Mongoose
- * @param c
- * @param ev
- * @param ev_data
- */
-static void http_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
-	if (ev == MG_EV_HTTP_MSG){
-		struct mg_http_message *hm = (struct mg_http_message *) ev_data;  // Parsed HTTP request
-		if (mg_match(hm->uri, mg_str("/websocket"), NULL)) {
-			// Upgrade to websocket. From now on, a connection is a full-duplex
-			// Websocket connection, which will receive MG_EV_WS_MSG events.
-			mg_ws_upgrade(c, hm, NULL);
-		} else if (mg_match(hm->uri, mg_str("/api"), NULL)) {
-			char *str_action = mg_json_get_str(hm->body, "$.action");
-			
-			if (strcmp(str_action, "get_status") == 0) {
-				MG_INFO(("Getting status"));
-				datetime_t dt;
-				rtc_get_datetime(&dt);
-				mg_http_reply(c, 200, "Content-Type: application/json\r\n", 
-					"\"status\": \"OK\","
-            		"\"current_day\": %d,"
-            		"\"current_time\": %d,"
-            		"\"heating_state\": 1,"
-            		"\"is_heating\": 1,"
-            		"\"boost_timer_countdown\": 0,"
-            		"\"timers\": [[127, 450, 390],[0, 420, 420],[0, 420, 420],[0, 420, 420],[0, 420, 420],[0, 420, 420]]"
-					"\n", 
-					sys_dayOfWeek(&dt), dt.hour * 60 + dt.min);
-			} else {
-				mg_http_reply(c, 400, "", "{\"status\": \"ERROR\", \"message\": \"Unkown action\"}\n", 123);
-				MG_INFO(("Unknown action"));
-			}
-			
-			mg_free(str_action);
-		} else {
-			struct mg_http_serve_opts opts = {
-				.root_dir = "/web",
-				.fs = &mg_fs_packed
-			 };
-			mg_http_serve_dir(c, hm, &opts);
-		}
-	} else if (ev == MG_EV_WS_MSG) {
-		// Got websocket frame. Received data is wm->data. Echo it back!
-		struct mg_ws_message *wm = (struct mg_ws_message *) ev_data;
-		mg_ws_send(c, wm->data.buf, wm->data.len, WEBSOCKET_OP_TEXT);
-	}
-}
-
-/***
- * Initialise Mongoose and network
- */
-void mongoose_init(void) {
-	mg_mgr_init(&g_mgr);      // Initialise event manager
-	mg_log_set(MG_LL_DEBUG);  // Set log level to debug
-
-	MG_INFO(("Starting HTTP listener"));
-	mg_http_listen(&g_mgr, HTTP_URL, http_ev_handler, NULL);
-}
-
-/***
- * Poll Mongoose
- */
-void mongoose_poll(void) {
-  	mg_mgr_poll(&g_mgr, 10);
 }
 
 /***
@@ -234,17 +236,25 @@ int main(){
 
 	// do not access the CYW43 LED before Mongoose initializes !
 	MG_INFO(("Hardware initialised, starting firmware..."));
+	
 	// This blocks forever. Call it at the end of main()
-	mongoose_init();
+	mg_mgr_init(&g_mgr);      // Initialise event manager
+	mg_log_set(MG_LL_DEBUG);  // Set log level to debug
+	MG_INFO(("Starting HTTP listener"));
+	mg_http_listen(&g_mgr, HTTP_URL, http_ev_handler, NULL);
+
 	// This timer checks the time every 1s and enables/disables the relay
 	mg_timer_add(&g_mgr, 1000, MG_TIMER_REPEAT, blink_timer, NULL);
+	// This timer sends status to open web sockets
+	mg_timer_add(&g_mgr, 1000, MG_TIMER_REPEAT, ws_timer, &g_mgr);
 	// This timer does an SNTP refresh. Refresh happens once a day, but timer checks if the time needs setting every 10s
 	mg_timer_add(&g_mgr, 10000, MG_TIMER_REPEAT | MG_TIMER_RUN_NOW, sntp_timer, &g_mgr);
 	// This timer is a network reset check
 	mg_timer_add(&g_mgr, 60000, MG_TIMER_REPEAT | MG_TIMER_RUN_NOW, net_check_timer, &g_mgr);
 	for (;;) {
-		mongoose_poll();
+		mg_mgr_poll(&g_mgr, 10);
 	}
+	mg_mgr_free(&g_mgr); // Free manager resources
 
 	return 0;
 }

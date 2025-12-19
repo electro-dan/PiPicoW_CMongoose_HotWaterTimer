@@ -21,18 +21,16 @@ function streamStatus() {
             ws.close(); 
             return; 
         }
-        ws = new WebSocket(url.value);
+        ws = new WebSocket("ws://" + location.host + "/websocket");
         if (!ws) return;
 
-        //ws.onopen = function() { log.innerHTML += 'CONNECTION OPENED<br/>'; }
         ws.onmessage = function(ev) { 
             updateStatus(ev.data);
         }
         ws.onerror = function(ev) { 
-            console.log(error);
+            console.log(ev);
         }
         ws.onclose = function() { 
-            console.log(error);
             ws = null; 
         }
     }
