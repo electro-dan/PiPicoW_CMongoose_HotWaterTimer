@@ -23,3 +23,6 @@ To build file system:
     cd ~/GIT/PiPicoW_CMongoose_HotWaterTimer
     lib/mongoose/test/pack web/* > src/fs.c
 
+Bug list
+x Web socket not closing when tab losing focus - seems to close on re-focus
+- Web socket stops updating (firefox)

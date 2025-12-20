@@ -30,9 +30,50 @@ struct mg_mgr g_mgr;
 
 uint64_t sntp_refresh_counter = 0;
 bool sntp_refresh_required = true;
+// Used to determine if data needs to be sent on websocket
+// Set to true when:
+// Date/Time changes
+// Any set API received
+// First websocket load
+bool state_changed = true; 
 
 // SNTP client connection
 static struct mg_connection *s_sntp_conn = NULL;
+
+struct s_status {
+	uint8_t current_day = 1; // Day 1-7
+	short current_time = 0; // Time since start of day in minutes
+	bool heating_state = false;
+	bool is_heating = false;
+	short boost_timer_countdown = 0;
+	uint8_t boost_pressed = 0;
+	short timers[6][3] = {{127, 450, 390},{0, 420, 420},{0, 420, 420},{0, 420, 420},{0, 420, 420},{0, 420, 420}};
+} g_status;
+
+short boost_timer = 1800; // timer in seconds (30 minutes)
+short boost_timer_add = 900; // timer increase in seconds (15 minutes)
+
+void update_datetime() {
+	// Get the RTC date and time
+	datetime_t dt;
+	rtc_get_datetime(&dt);
+
+	/*MG_INFO(("RTC: %d-%d-%d %d:%d:%d\n",
+		dt.year,
+		dt.month,
+		dt.day,
+		dt.hour,
+		dt.min,
+		dt.sec));*/
+
+	short new_time = dt.hour * 60 + dt.min;
+	// Day will change when time changes, so implied
+	if (new_time != g_status.current_time) {
+		g_status.current_day = day_of_week(&dt);
+		g_status.current_time = new_time;
+		state_changed = true;
+	}
+}
 
 /***
  * Setup credentials for WiFi
@@ -49,35 +90,61 @@ void main_setconfig(void *data) {
  * @param arg
  */
 static void blink_timer(void *arg) {
-  	//(void) arg;
+  	(void) arg;
   	cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, !cyw43_arch_gpio_get(CYW43_WL_GPIO_LED_PIN));
 }
 
 static void ws_timer(void *arg) {
-	// Get the RTC date and time
-	datetime_t dt;
-	rtc_get_datetime(&dt);
-	/*MG_INFO(("RTC: %d-%d-%d %d:%d:%d\n",
-			dt.year,
-			dt.month,
-			dt.day,
-			dt.hour,
-			dt.min,
-			dt.sec));*/
+	
+	update_datetime();
 
-	struct mg_mgr *mgr = (struct mg_mgr *) arg;
-	struct mg_connection *c;
-	for (c = mgr->conns; c != NULL; c = c->next) {
-		if (c->data[0] != 'W') continue;
-		mg_ws_printf(c, WEBSOCKET_OP_TEXT, "{\"status\": \"OK\","
-            		"\"current_day\": %d,"
-            		"\"current_time\": %d,"
-            		"\"heating_state\": 1,"
-            		"\"is_heating\": 1,"
-            		"\"boost_timer_countdown\": 0,"
-            		"\"timers\": [[127, 450, 390],[0, 420, 420],[0, 420, 420],[0, 420, 420],[0, 420, 420],[0, 420, 420]]"
-					"}\n", day_of_week(&dt), dt.hour * 60 + dt.min);
+	// iterate through timers
+    g_status.is_heating = false;
+    // if heating is enabled
+    if (g_status.heating_state) {
+		for (char i = 0; i < 6; i++) {
+			// if timer is enabled for today (bitwise AND)
+			if (g_status.current_day & g_status.timers[i][0]) {
+				// if the on and off timer are not the same
+				if (g_status.timers[i][1] != g_status.timers[i][2]) {
+					// if the current time is between the on and off times, enable heating
+                    if (g_status.current_time >= g_status.timers[i][1] && g_status.current_time < g_status.timers[i][2])
+                        g_status.is_heating = true;
+				}
+			}
+		}
+		if (g_status.boost_timer_countdown > 0) {
+			g_status.is_heating = true;
+            g_status.boost_timer_countdown--; // take off 1 second
+			state_changed = true;
+		}
 	}
+	
+	// If status changed, send web socket
+	if (state_changed) {
+		struct mg_mgr *mgr = (struct mg_mgr *) arg;
+		struct mg_connection *c;
+		for (c = mgr->conns; c != NULL; c = c->next) {
+			if (c->data[0] != 'W') continue;
+			MG_INFO(("WS Send"));
+
+			mg_ws_printf(c, WEBSOCKET_OP_TEXT, 
+				"{%m: %m, %m: %d, %m: %d, %m: %d, %m: %d, %m: %d,%m: [[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d]]}\n", 
+				MG_ESC("status"), MG_ESC("OK"), MG_ESC("current_day"), g_status.current_day, MG_ESC("current_time"), g_status.current_time, 
+				MG_ESC("heating_state"), g_status.heating_state, MG_ESC("is_heating"), g_status.is_heating, 
+				MG_ESC("boost_timer_countdown"), g_status.boost_timer_countdown, MG_ESC("timers"), 
+				g_status.timers[0][0], g_status.timers[0][1], g_status.timers[0][2],
+				g_status.timers[1][0], g_status.timers[1][1], g_status.timers[1][2],
+				g_status.timers[2][0], g_status.timers[2][1], g_status.timers[2][2],
+				g_status.timers[3][0], g_status.timers[3][1], g_status.timers[3][2],
+				g_status.timers[4][0], g_status.timers[4][1], g_status.timers[4][2],
+				g_status.timers[5][0], g_status.timers[5][1], g_status.timers[5][2]
+			);
+		}
+		// Sent state, clear status
+		state_changed = false;
+	}
+
 }
 
 // SNTP client callback
@@ -140,6 +207,10 @@ static void sntp_timer(void *arg) {
 	sntp_refresh_counter++;
 }
 
+static void save_data() {
+
+}
+
 /***
  * Main event callback handler for Mongoose
  * @param c
@@ -155,6 +226,7 @@ static void http_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
 			mg_ws_upgrade(c, hm, NULL);
 			// Set some unique mark on the connection
 			c->data[0] = 'W';
+			state_changed = true; // Ensure current state is sent
 		} else if (mg_match(hm->uri, mg_str("/api"), NULL)) {
 			char *str_action = mg_json_get_str(hm->body, "$.action");
 			
@@ -163,17 +235,97 @@ static void http_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
 				datetime_t dt;
 				rtc_get_datetime(&dt);
 				mg_http_reply(c, 200, "Content-Type: application/json\r\n", 
-					"{\"status\": \"OK\","
-            		"\"current_day\": %d,"
-            		"\"current_time\": %d,"
-            		"\"heating_state\": 1,"
-            		"\"is_heating\": 1,"
-            		"\"boost_timer_countdown\": 0,"
-            		"\"timers\": [[127, 450, 390],[0, 420, 420],[0, 420, 420],[0, 420, 420],[0, 420, 420],[0, 420, 420]]"
-					"}\n", 
-					day_of_week(&dt), dt.hour * 60 + dt.min);
+					"{%m: %m, %m: %d, %m: %d, %m: %d, %m: %d, %m: %d,%m: [[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d]]}\n", 
+					MG_ESC("status"), MG_ESC("OK"), MG_ESC("current_day"), g_status.current_day, MG_ESC("current_time"), g_status.current_time, 
+					MG_ESC("heating_state"), g_status.heating_state, MG_ESC("is_heating"), g_status.is_heating, 
+					MG_ESC("boost_timer_countdown"), g_status.boost_timer_countdown, MG_ESC("timers"), 
+					g_status.timers[0][0], g_status.timers[0][1], g_status.timers[0][2],
+					g_status.timers[1][0], g_status.timers[1][1], g_status.timers[1][2],
+					g_status.timers[2][0], g_status.timers[2][1], g_status.timers[2][2],
+					g_status.timers[3][0], g_status.timers[3][1], g_status.timers[3][2],
+					g_status.timers[4][0], g_status.timers[4][1], g_status.timers[4][2],
+					g_status.timers[5][0], g_status.timers[5][1], g_status.timers[5][2]
+				);
+			} else if (strcmp(str_action, "trigger_heating") == 0) {
+				MG_INFO(("Trigger heating"));
+				// Permanently turn heating off (holiday mode) or on
+        		g_status.heating_state = !g_status.heating_state;
+
+				mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{%m: %m, %m: %d}",
+					MG_ESC("status"), MG_ESC("OK"), MG_ESC("heating_state"), g_status.heating_state
+				);
+				state_changed = true; 
+			} else if (strcmp(str_action, "boost") == 0) {
+				// Execute a manual heating 'boost' timer
+        		if (g_status.boost_timer_countdown == 0) {
+					g_status.boost_pressed = 1;
+					g_status.boost_timer_countdown = boost_timer;
+					g_status.heating_state = true; // Boost will also enable the heating
+				} else {
+					// Subsequent pushes of the boost button will increase boost timer by 15 minutes until 3 pushes
+					if (g_status.boost_pressed < 3) {
+						g_status.boost_timer_countdown += boost_timer_add;
+						g_status.boost_pressed += 1;
+					} else {
+						g_status.boost_pressed = 0;
+						g_status.boost_timer_countdown = 0;
+					}
+				}
+				mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{%m: %m, %m: %d}",
+					MG_ESC("status"), MG_ESC("OK"), MG_ESC("boost_timer_countdown"), g_status.boost_timer_countdown
+				);
+				state_changed = true; 
+			} else if (strcmp(str_action, "set_timer") == 0) {
+				// Change a timer days and on/off time (minutes of day)
+				double d_timer_number = 0.0;
+				double d_new_days = 0.0;
+				double d_new_on_time = 0.0;
+				double d_new_off_time = 0.0;
+				
+				if (!mg_json_get_num(hm->body, "$.timer_number", &d_timer_number)) {
+					mg_http_reply(c, 400, "", "{%m: %m, %m: %m}\n", MG_ESC("status"), MG_ESC("ERROR"), MG_ESC("message"), MG_ESC("No timer number"));
+					return;
+				}
+				if (!mg_json_get_num(hm->body, "$.new_days", &d_new_days)) {
+					mg_http_reply(c, 400, "", "{%m: %m, %m: %m}\n", MG_ESC("status"), MG_ESC("ERROR"), MG_ESC("message"), MG_ESC("No timer days"));
+					return;
+				}
+				if (!mg_json_get_num(hm->body, "$.new_on_time", &d_new_on_time)) {
+					mg_http_reply(c, 400, "", "{%m: %m, %m: %m}\n", MG_ESC("status"), MG_ESC("ERROR"), MG_ESC("message"), MG_ESC("No on time"));
+					return;
+				}
+				if (!mg_json_get_num(hm->body, "$.new_off_time", &d_new_off_time)) {
+					mg_http_reply(c, 400, "", "{%m: %m, %m: %m}\n", MG_ESC("status"), MG_ESC("ERROR"), MG_ESC("message"), MG_ESC("No off time"));
+					return;
+				}
+				// Double to short
+				short timer_number = d_timer_number;
+				short new_days = d_new_days;
+				short new_on_time = d_new_on_time;
+				short new_off_time = d_new_off_time;
+				
+
+				// Validate inputs
+				if (timer_number < 1 || timer_number > 6) {
+					mg_http_reply(c, 400, "", "{%m: %m, %m: %m}\n", MG_ESC("status"), MG_ESC("ERROR"), MG_ESC("message"), MG_ESC("Invalid timer number"));
+				} else if (new_days < 0 || new_days > 127) {
+					mg_http_reply(c, 400, "", "{%m: %m, %m: %m}\n", MG_ESC("status"), MG_ESC("ERROR"), MG_ESC("message"), MG_ESC("Invalid timer days"));
+				} else if (new_on_time < 0 || new_on_time > 1410) {
+					mg_http_reply(c, 400, "", "{%m: %m, %m: %m}\n", MG_ESC("status"), MG_ESC("ERROR"), MG_ESC("message"), MG_ESC("Invalid on time"));
+				} else if (new_off_time < 0 || new_off_time > 1410) {
+					mg_http_reply(c, 400, "", "{%m: %m, %m: %m}\n", MG_ESC("status"), MG_ESC("ERROR"), MG_ESC("message"), MG_ESC("Invalid off time"));
+				} else {
+					g_status.timers[timer_number - 1][0] = new_days;
+					g_status.timers[timer_number - 1][1] = new_on_time;
+					g_status.timers[timer_number - 1][2] = new_off_time;
+					save_data();
+					mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{%m: %m, %m: %d}",
+						MG_ESC("status"), MG_ESC("OK"), MG_ESC("timer_number"), timer_number, MG_ESC("new_days"), new_days, MG_ESC("new_on_time"), new_on_time, MG_ESC("new_off_time"), new_off_time
+					);
+					state_changed = true; 
+				}
 			} else {
-				mg_http_reply(c, 400, "", "{\"status\": \"ERROR\", \"message\": \"Unkown action\"}\n", 123);
+				mg_http_reply(c, 400, "", "{%m: %m, %m: %m}\n", MG_ESC("status"), MG_ESC("ERROR"), MG_ESC("message"), MG_ESC("Unknown Action"));
 				MG_INFO(("Unknown action"));
 			}
 			

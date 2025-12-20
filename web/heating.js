@@ -17,11 +17,11 @@ if (typeof document.hidden !== "undefined") {
 // WebSocket called on load, streams from pico to browser
 function streamStatus() {
     if (!document[hidden]) {
-        if (ws) { 
-            ws.close(); 
-            return; 
+        console.log("Visible");
+        if (!ws) {
+            console.log("Open websocket");
+            ws = new WebSocket("ws://" + location.host + "/websocket");
         }
-        ws = new WebSocket("ws://" + location.host + "/websocket");
         if (!ws) return;
 
         ws.onmessage = function(ev) { 
@@ -32,6 +32,13 @@ function streamStatus() {
         }
         ws.onclose = function() { 
             ws = null; 
+        }
+    } else {
+        console.log("Hidden");
+        if (ws) { 
+            ws.close(); 
+            console.log("Close websocket");
+            return; 
         }
     }
 }
@@ -198,8 +205,8 @@ function editTimer(timer) {
             "action": "set_timer",
             "timer_number": timer,
             "new_days": newDays,
-            "new_on_time": document.getElementById("t" + timer + "OnInput").value,
-            "new_off_time": document.getElementById("t" + timer + "OffInput").value
+            "new_on_time": +document.getElementById("t" + timer + "OnInput").value,
+            "new_off_time": +document.getElementById("t" + timer + "OffInput").value
         };
         // Post back to the python service
         const xhttp = new XMLHttpRequest();
@@ -252,8 +259,11 @@ function toggleControlsDisabled(timer, isDisabled) {
 // This one is for mobiles when the browser/tab resumes
 document.addEventListener("visibilitychange", streamStatus, false);
 window.addEventListener('beforeunload', () => {
-	if (ws)
+	console.log("Before unload");
+    if (ws) {
+        console.log("Close websocket");
         ws.close();
+    }
 });
 
 // For desktops when tab is focused
