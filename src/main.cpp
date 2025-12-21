@@ -91,6 +91,12 @@ static void button_timer(void *arg) {
 static void relay_timer(void *arg) {
 	// Enable or disable the output
 	if (g_status.is_heating) {
+		// The relay is connected by two pins. 
+		// - Pin 28 is directly connected to the relay coil and used to trigger the relay (via NPN darlington transistor TIP120)
+		// - Pin 27 connected to the relay coil via a low value resistor (29R) and used to hold the relay closed (via NPN darlington 
+		//   transistor TIP120) with less current consumption
+		// Both pins need to be low to release the relay
+		
 		// Run hold first - this will switch the relay into hold state if last run was to activate
 		if (gpio_get(GPIO_RELAY_TRIG)) {
 			gpio_put(GPIO_RELAY_TRIG, 0);
@@ -518,9 +524,11 @@ int main(){
 	MG_INFO(("Starting HTTP listener"));
 	mg_http_listen(&g_mgr, HTTP_URL, http_ev_handler, NULL);
 
-	// This timer checks the time every 1s and enables/disables the relay
+	// This timer just blinks every second
 	mg_timer_add(&g_mgr, 1000, MG_TIMER_REPEAT, blink_timer, NULL);
+	// This timer polls for a button push
 	mg_timer_add(&g_mgr, 1, MG_TIMER_REPEAT, button_timer, NULL);
+	// This timer does the relay output and hold
 	mg_timer_add(&g_mgr, 300, MG_TIMER_REPEAT, relay_timer, NULL);
 	// This timer activates any timers and sends status to open web sockets
 	mg_timer_add(&g_mgr, 1000, MG_TIMER_REPEAT, one_second_timer, &g_mgr);
