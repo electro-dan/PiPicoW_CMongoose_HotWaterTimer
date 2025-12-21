@@ -4,16 +4,9 @@
  * A hot water timer with web control using Mongoose Application to pass back static web pages and handle rest requests and websocket
  * Using Mongoose TCPIP stack and Drivers
  * Listen on port 80
- *  Created on: November 2025
+ *  Created on: December 2025
  *      Author: electro-dan
  */
-
-/* TODO
-
-Add time request
-Add flash save / load
-
-*/
 
 #include <cstdio>
 #include <pico/stdlib.h>
@@ -25,12 +18,8 @@ Add flash save / load
 #include "mongoose.h"
 #include "main.h"
 
-#define HTTP_URL "http://0.0.0.0:80"
-
 struct mg_mgr g_mgr;
 
-uint64_t sntp_refresh_counter = 0;
-bool sntp_refresh_required = true;
 // Used to determine if data needs to be sent on websocket
 // Set to true when:
 // Date/Time changes
@@ -51,9 +40,6 @@ struct s_status {
 	uint16_t timers[6][3] = {{127, 450, 390},{0, 420, 420},{0, 420, 420},{0, 420, 420},{0, 420, 420},{0, 420, 420}};
 } g_status;
 
-uint16_t boost_timer = 1800; // timer in seconds (30 minutes)
-uint16_t boost_timer_add = 900; // timer increase in seconds (15 minutes)
-
 /***
  * Setup credentials for WiFi
  * @param data
@@ -66,6 +52,7 @@ void main_setconfig(void *data) {
 
 /***
  * Blink Status LED as call back from Mongoose
+ * This isn't required, but nice to see if a crash has happened
  * @param arg
  */
 static void blink_timer(void *arg) {
@@ -74,7 +61,7 @@ static void blink_timer(void *arg) {
 }
 
 /***
- * Button polling timer
+ * Button polling timer, checks every 1ms
  * @param arg
  */
 static void button_timer(void *arg) {
@@ -121,7 +108,7 @@ static void relay_timer(void *arg) {
 }
 
 /***
- * Relay activation timer
+ * 1-second timer, used to check state and enable/disable heating and send data back via websocket if required
  * @param arg
  */
 static void one_second_timer(void *arg) {
@@ -195,30 +182,11 @@ static void one_second_timer(void *arg) {
 	}
 }
 
-// SNTP client callback
-static void sfn(struct mg_connection *c, int ev, void *ev_data) {
-	if (ev == MG_EV_SNTP_TIME) {
-		// Time received, the internal protocol handler updates what mg_now() returns
-		uint64_t curtime = mg_now();
-		MG_INFO(("SNTP-updated current time is: %llu ms from epoch", curtime));
-		// otherwise, you can process the server returned data yourself
-		{
-			uint64_t t = *(uint64_t *) ev_data;
-			datetime_t dt;
-			time_to_datetime(t / 1000, &dt);
-			MG_INFO(("Setting RTC to: %d-%d-%d %d:%d:%d\n", dt.year, dt.month, dt.day, dt.hour, dt.min, dt.sec));
-			rtc_set_datetime(&dt);
-			// Reset counter and refresh required flag
-			sntp_refresh_counter = 0;
-			sntp_refresh_required = false;
-		}
-	} else if (ev == MG_EV_CLOSE) {
-		s_sntp_conn = NULL;
-	}
-	(void) c;
-}
-
-// Called every 60 seconds - resets network state if stuck in DHCP REQUESTING or DOWN
+/***
+ * Check network timer 
+ * Called every 60 seconds - resets network state if stuck in DHCP REQUESTING or DOWN
+ * @param arg
+ */
 static void net_check_timer(void *arg) {
 	/* check state */
 	//MG_INFO(("State: %d", g_mgr.ifp->state));
@@ -233,7 +201,10 @@ static void net_check_timer(void *arg) {
 	}
 }
 
-// Called every 5 seconds. Increase that for production case.
+/***
+ * SNTP Timer - runs every 10 seconds, but only updates daily as required
+ * @param arg
+ */
 static void sntp_timer(void *arg) {
 	// Check if refresh was at least 24h ago
 	if (sntp_refresh_counter > 8640)
@@ -250,8 +221,9 @@ static void sntp_timer(void *arg) {
 }
 
 /*
-	Get data to flash, used to restore timers in case of power loss
-*/
+ * Get data to flash, used to restore timers in case of power loss
+ * Uses library from https://github.com/jondurrant/RPIPicoOnboardNVS/
+ */
 static void get_data() {
 	NVSOnboard * nvs = NVSOnboard::getInstance();
 
@@ -282,8 +254,9 @@ static void get_data() {
 }
 
 /*
-	Save data to flash
-*/
+ * Save data to flash
+ * Uses library from https://github.com/jondurrant/RPIPicoOnboardNVS/
+ */
 static void save_data() {
 	NVSOnboard * nvs = NVSOnboard::getInstance();
 	
@@ -303,7 +276,9 @@ static void save_data() {
 	MG_INFO(("Data saved to flash"));
 }
 
-// Activate, increase and deactivate a one-shot boost timer
+/*
+ * Activate, increase and deactivate a one-shot boost timer
+ */
 static void do_boost() {
 	// Execute a manual heating 'boost' timer
 	if (g_status.boost_timer_countdown == 0) {
@@ -321,6 +296,34 @@ static void do_boost() {
 		}
 	}
 	state_changed = true; 
+}
+
+/***
+ * SNTP callback handler for Mongoose
+ * @param c
+ * @param ev
+ * @param ev_data
+ */
+static void sfn(struct mg_connection *c, int ev, void *ev_data) {
+	if (ev == MG_EV_SNTP_TIME) {
+		// Time received, the internal protocol handler updates what mg_now() returns
+		uint64_t curtime = mg_now();
+		MG_INFO(("SNTP-updated current time is: %llu ms from epoch", curtime));
+		// otherwise, you can process the server returned data yourself
+		{
+			uint64_t t = *(uint64_t *) ev_data;
+			datetime_t dt;
+			time_to_datetime(t / 1000, &dt);
+			MG_INFO(("Setting RTC to: %d-%d-%d %d:%d:%d\n", dt.year, dt.month, dt.day, dt.hour, dt.min, dt.sec));
+			rtc_set_datetime(&dt);
+			// Reset counter and refresh required flag
+			sntp_refresh_counter = 0;
+			sntp_refresh_required = false;
+		}
+	} else if (ev == MG_EV_CLOSE) {
+		s_sntp_conn = NULL;
+	}
+	(void) c;
 }
 
 /***
@@ -442,7 +445,11 @@ static void http_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
 	}
 }
 
-// https://forums.raspberrypi.com/viewtopic.php?t=312419
+/***
+ * Get the day of week from a datetime_t
+ * From https://forums.raspberrypi.com/viewtopic.php?t=312419
+ * @return uint8_t for the day of the week 1=Monday, 7=Sunday
+ */
 uint8_t day_of_week(datetime_t *dt) {
     uint8_t day = dt->day; 
     uint8_t month = dt->month; 
