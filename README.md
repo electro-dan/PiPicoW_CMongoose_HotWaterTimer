@@ -18,11 +18,16 @@ Rebuild:
 
     cd .. && rm -r build && mkdir build && cd build
 
-To build file system:
+To build the file system:
 
     cd ~/GIT/PiPicoW_CMongoose_HotWaterTimer
     lib/mongoose/test/pack web/* > src/fs.c
 
+Todo list
+x Flash read/save
+x Relay pin activation with delay
+x Boost switch
+
 Bug list
 x Web socket not closing when tab losing focus - seems to close on re-focus
-- Web socket stops updating (firefox)
+x Web socket stops updating (firefox)

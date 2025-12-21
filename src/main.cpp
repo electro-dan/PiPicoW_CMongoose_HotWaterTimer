@@ -20,6 +20,7 @@ Add flash save / load
 #include "pico/util/datetime.h"
 #include <time.h>
 #include "hardware/rtc.h"
+#include "NVSOnboard.h"
 
 #include "mongoose.h"
 #include "main.h"
@@ -42,38 +43,16 @@ static struct mg_connection *s_sntp_conn = NULL;
 
 struct s_status {
 	uint8_t current_day = 1; // Day 1-7
-	short current_time = 0; // Time since start of day in minutes
+	uint16_t current_time = 0; // Time since start of day in minutes
 	bool heating_state = false;
 	bool is_heating = false;
-	short boost_timer_countdown = 0;
+	uint16_t boost_timer_countdown = 0;
 	uint8_t boost_pressed = 0;
-	short timers[6][3] = {{127, 450, 390},{0, 420, 420},{0, 420, 420},{0, 420, 420},{0, 420, 420},{0, 420, 420}};
+	uint16_t timers[6][3] = {{127, 450, 390},{0, 420, 420},{0, 420, 420},{0, 420, 420},{0, 420, 420},{0, 420, 420}};
 } g_status;
 
-short boost_timer = 1800; // timer in seconds (30 minutes)
-short boost_timer_add = 900; // timer increase in seconds (15 minutes)
-
-void update_datetime() {
-	// Get the RTC date and time
-	datetime_t dt;
-	rtc_get_datetime(&dt);
-
-	/*MG_INFO(("RTC: %d-%d-%d %d:%d:%d\n",
-		dt.year,
-		dt.month,
-		dt.day,
-		dt.hour,
-		dt.min,
-		dt.sec));*/
-
-	short new_time = dt.hour * 60 + dt.min;
-	// Day will change when time changes, so implied
-	if (new_time != g_status.current_time) {
-		g_status.current_day = day_of_week(&dt);
-		g_status.current_time = new_time;
-		state_changed = true;
-	}
-}
+uint16_t boost_timer = 1800; // timer in seconds (30 minutes)
+uint16_t boost_timer_add = 900; // timer increase in seconds (15 minutes)
 
 /***
  * Setup credentials for WiFi
@@ -94,9 +73,71 @@ static void blink_timer(void *arg) {
   	cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, !cyw43_arch_gpio_get(CYW43_WL_GPIO_LED_PIN));
 }
 
-static void ws_timer(void *arg) {
+/***
+ * Button polling timer
+ * @param arg
+ */
+static void button_timer(void *arg) {
+	// Poll input button
+	// See https://www.e-tinkers.com/2021/05/the-simplest-button-debounce-solution/
+	static uint16_t state = 0;
+	state = (state << 1) | gpio_get(GPIO_BUTTON_PIN) | 0xFE00;
+	if (state == 0xff00) {
+		// Execute a manual heating 'boost' timer
+		if (g_status.boost_timer_countdown == 0) {
+			g_status.boost_pressed = 1;
+			g_status.boost_timer_countdown = boost_timer;
+			g_status.heating_state = true; // Boost will also enable the heating
+		} else {
+			// If already in boost mode, switch off (does not increase like web front end)
+			g_status.boost_pressed = 0;
+			g_status.boost_timer_countdown = 0;
+		}
+		state_changed = true; 
+	}
+}
+
+/***
+ * Relay activation timer
+ * @param arg
+ */
+static void relay_timer(void *arg) {
+	// Enable or disable the output
+	if (g_status.is_heating) {
+		// Run hold first - this will switch the relay into hold state if last run was to activate
+		if (gpio_get(GPIO_RELAY_TRIG)) {
+			gpio_put(GPIO_RELAY_TRIG, 0);
+			gpio_put(GPIO_RELAY_HOLD, 1);
+		}
+		// This will activate the relay if it is off or not in hold state
+        if (!gpio_get(GPIO_RELAY_TRIG) & !gpio_get(GPIO_RELAY_TRIG)) {
+			gpio_put(GPIO_RELAY_TRIG, 1);
+		}
+	} else {
+		// Deactivate the relay
+		gpio_put(GPIO_RELAY_HOLD, 0);
+		gpio_put(GPIO_RELAY_TRIG, 0);
+	}
+}
+
+/***
+ * Relay activation timer
+ * @param arg
+ */
+static void one_second_timer(void *arg) {
 	
-	update_datetime();
+	// Get the RTC date and time
+	datetime_t dt;
+	rtc_get_datetime(&dt);
+
+	/*MG_INFO(("RTC: %d-%d-%d %d:%d:%d\n", dt.year, dt.month, dt.day, dt.hour, dt.min, dt.sec));*/
+	uint16_t new_time = dt.hour * 60 + dt.min;
+	// Day will change when time changes, so implied
+	if (new_time != g_status.current_time) {
+		g_status.current_day = day_of_week(&dt);
+		g_status.current_time = new_time;
+		state_changed = true;
+	}
 
 	// iterate through timers
     g_status.is_heating = false;
@@ -107,9 +148,17 @@ static void ws_timer(void *arg) {
 			if (g_status.current_day & g_status.timers[i][0]) {
 				// if the on and off timer are not the same
 				if (g_status.timers[i][1] != g_status.timers[i][2]) {
-					// if the current time is between the on and off times, enable heating
-                    if (g_status.current_time >= g_status.timers[i][1] && g_status.current_time < g_status.timers[i][2])
-                        g_status.is_heating = true;
+					if (g_status.timers[i][1] < g_status.timers[i][2]) {
+						// if off is after on
+						// if the current time is between the on and off times, enable heating
+						if (g_status.current_time >= g_status.timers[i][1] && g_status.current_time < g_status.timers[i][2])
+							g_status.is_heating = true;
+					} else {
+						// If off is before on
+						// if the current time is outside the on and off times, enable heating
+						if (g_status.current_time >= g_status.timers[i][1] || g_status.current_time < g_status.timers[i][2])
+							g_status.is_heating = true;
+					}
 				}
 			}
 		}
@@ -144,7 +193,6 @@ static void ws_timer(void *arg) {
 		// Sent state, clear status
 		state_changed = false;
 	}
-
 }
 
 // SNTP client callback
@@ -158,13 +206,7 @@ static void sfn(struct mg_connection *c, int ev, void *ev_data) {
 			uint64_t t = *(uint64_t *) ev_data;
 			datetime_t dt;
 			time_to_datetime(t / 1000, &dt);
-			MG_INFO(("Setting RTC to: %d-%d-%d %d:%d:%d\n",
-				dt.year,
-				dt.month,
-				dt.day,
-				dt.hour,
-				dt.min,
-				dt.sec));
+			MG_INFO(("Setting RTC to: %d-%d-%d %d:%d:%d\n", dt.year, dt.month, dt.day, dt.hour, dt.min, dt.sec));
 			rtc_set_datetime(&dt);
 			// Reset counter and refresh required flag
 			sntp_refresh_counter = 0;
@@ -207,8 +249,78 @@ static void sntp_timer(void *arg) {
 	sntp_refresh_counter++;
 }
 
-static void save_data() {
+/*
+	Get data to flash, used to restore timers in case of power loss
+*/
+static void get_data() {
+	NVSOnboard * nvs = NVSOnboard::getInstance();
 
+	bool is_there_data = false;
+	char key[]="timer_0_0";
+	for (char i = 0; i < 6; i++) {
+		for (char j = 0; j < 3; j++) {
+			key[6] = i+48;
+			key[8] = j+48;
+			if (nvs->contains(key)) {
+				uint16_t v;
+				
+				nvs->get_u16(key, &v);
+				g_status.timers[i][j] = v;
+				
+				is_there_data = true;
+			}
+		}
+	}
+	if (is_there_data)	{
+		if (nvs->contains("is_heating")) {
+			nvs->get_bool("is_heating", &g_status.is_heating);
+		}
+		MG_INFO(("Data read from flash"));
+	} else {
+		MG_INFO(("No data in flash"));
+	}
+}
+
+/*
+	Save data to flash
+*/
+static void save_data() {
+	NVSOnboard * nvs = NVSOnboard::getInstance();
+	
+	char key[]="timer_0_0";
+	for (char i = 0; i < 6; i++) {
+		for (char j = 0; j < 3; j++) {
+			key[6] = i+48;
+			key[8] = j+48;
+			nvs->set_u16(key, g_status.timers[i][j]);
+		}
+	}
+	
+	nvs->set_bool("is_heating", g_status.is_heating);
+
+	nvs->commit();
+
+	MG_INFO(("Data saved to flash"));
+}
+
+// Activate, increase and deactivate a one-shot boost timer
+static void do_boost() {
+	// Execute a manual heating 'boost' timer
+	if (g_status.boost_timer_countdown == 0) {
+		g_status.boost_pressed = 1;
+		g_status.boost_timer_countdown = boost_timer;
+		g_status.heating_state = true; // Boost will also enable the heating
+	} else {
+		// Subsequent pushes of the boost button will increase boost timer by 15 minutes until 3 pushes
+		if (g_status.boost_pressed < 3) {
+			g_status.boost_timer_countdown += boost_timer_add;
+			g_status.boost_pressed += 1;
+		} else {
+			g_status.boost_pressed = 0;
+			g_status.boost_timer_countdown = 0;
+		}
+	}
+	state_changed = true; 
 }
 
 /***
@@ -250,31 +362,16 @@ static void http_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
 				MG_INFO(("Trigger heating"));
 				// Permanently turn heating off (holiday mode) or on
         		g_status.heating_state = !g_status.heating_state;
-
+				save_data();
 				mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{%m: %m, %m: %d}",
 					MG_ESC("status"), MG_ESC("OK"), MG_ESC("heating_state"), g_status.heating_state
 				);
 				state_changed = true; 
 			} else if (strcmp(str_action, "boost") == 0) {
-				// Execute a manual heating 'boost' timer
-        		if (g_status.boost_timer_countdown == 0) {
-					g_status.boost_pressed = 1;
-					g_status.boost_timer_countdown = boost_timer;
-					g_status.heating_state = true; // Boost will also enable the heating
-				} else {
-					// Subsequent pushes of the boost button will increase boost timer by 15 minutes until 3 pushes
-					if (g_status.boost_pressed < 3) {
-						g_status.boost_timer_countdown += boost_timer_add;
-						g_status.boost_pressed += 1;
-					} else {
-						g_status.boost_pressed = 0;
-						g_status.boost_timer_countdown = 0;
-					}
-				}
+				do_boost();
 				mg_http_reply(c, 200, "Content-Type: application/json\r\n", "{%m: %m, %m: %d}",
 					MG_ESC("status"), MG_ESC("OK"), MG_ESC("boost_timer_countdown"), g_status.boost_timer_countdown
 				);
-				state_changed = true; 
 			} else if (strcmp(str_action, "set_timer") == 0) {
 				// Change a timer days and on/off time (minutes of day)
 				double d_timer_number = 0.0;
@@ -298,11 +395,11 @@ static void http_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
 					mg_http_reply(c, 400, "", "{%m: %m, %m: %m}\n", MG_ESC("status"), MG_ESC("ERROR"), MG_ESC("message"), MG_ESC("No off time"));
 					return;
 				}
-				// Double to short
-				short timer_number = d_timer_number;
-				short new_days = d_new_days;
-				short new_on_time = d_new_on_time;
-				short new_off_time = d_new_off_time;
+				// Double to uint16_t
+				uint16_t timer_number = d_timer_number;
+				uint16_t new_days = d_new_days;
+				uint16_t new_on_time = d_new_on_time;
+				uint16_t new_off_time = d_new_off_time;
 				
 
 				// Validate inputs
@@ -362,7 +459,12 @@ uint8_t day_of_week(datetime_t *dt) {
     year = year % 100;
 
     // Zeller's congruence
-    return (c / 4 - 2 * c + year + year / 4 + 13 * (month + 1) / 5 + day - 1) % 7;
+    uint8_t dow = (c / 4 - 2 * c + year + year / 4 + 13 * (month + 1) / 5 + day - 1) % 7;
+	// Change Sunday from 0 to 7
+	if (dow == 0)
+		return 7;
+	else
+		return dow;
 }
 
 /***
@@ -375,6 +477,8 @@ int main(){
 
 	printf("Go\n");
 
+	get_data();
+
 	// RTC init with default date and time
 	datetime_t dt;
     dt.year = 2000;
@@ -385,6 +489,18 @@ int main(){
     dt.sec = 0;
 	rtc_init();
 	rtc_set_datetime(&dt);
+
+	// Boost button setup
+    gpio_init(GPIO_BUTTON_PIN); // Initialise the GPIO pin
+    gpio_set_dir(GPIO_BUTTON_PIN, GPIO_IN); // Set it as an input
+    gpio_pull_up(GPIO_BUTTON_PIN); // Enable internal pull-up resistor
+
+	// Relay pins
+	gpio_init(GPIO_RELAY_TRIG); // Initialise the GPIO pin
+    gpio_set_dir(GPIO_RELAY_TRIG, GPIO_OUT); // Set it as an output
+	gpio_init(GPIO_RELAY_HOLD); // Initialise the GPIO pin
+    gpio_set_dir(GPIO_RELAY_HOLD, GPIO_OUT); // Set it as an output
+    
 
 	// do not access the CYW43 LED before Mongoose initializes !
 	MG_INFO(("Hardware initialised, starting firmware..."));
@@ -397,8 +513,10 @@ int main(){
 
 	// This timer checks the time every 1s and enables/disables the relay
 	mg_timer_add(&g_mgr, 1000, MG_TIMER_REPEAT, blink_timer, NULL);
-	// This timer sends status to open web sockets
-	mg_timer_add(&g_mgr, 1000, MG_TIMER_REPEAT, ws_timer, &g_mgr);
+	mg_timer_add(&g_mgr, 1, MG_TIMER_REPEAT, button_timer, NULL);
+	mg_timer_add(&g_mgr, 300, MG_TIMER_REPEAT, relay_timer, NULL);
+	// This timer activates any timers and sends status to open web sockets
+	mg_timer_add(&g_mgr, 1000, MG_TIMER_REPEAT, one_second_timer, &g_mgr);
 	// This timer does an SNTP refresh. Refresh happens once a day, but timer checks if the time needs setting every 10s
 	mg_timer_add(&g_mgr, 10000, MG_TIMER_REPEAT | MG_TIMER_RUN_NOW, sntp_timer, &g_mgr);
 	// This timer is a network reset check

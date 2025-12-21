@@ -1,6 +1,7 @@
+include(files.cmake)
 add_executable(${NAME}
         main.cpp
-        fs.c
+        ${SRC_FILES}
 )
 
 # Pull in our pico_stdlib which pulls in commonly used features
