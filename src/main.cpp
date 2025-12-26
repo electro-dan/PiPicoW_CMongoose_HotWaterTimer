@@ -40,14 +40,25 @@ struct s_status {
 	uint16_t timers[6][3] = {{127, 450, 390},{0, 420, 420},{0, 420, 420},{0, 420, 420},{0, 420, 420},{0, 420, 420}};
 } g_status;
 
-/***
- * Setup credentials for WiFi
- * @param data
- */
-void main_setconfig(void *data) {
-	struct mg_tcpip_driver_pico_w_data *d = (struct mg_tcpip_driver_pico_w_data *)data;
-	d->ssid = (char *)WIFI_SSID;
-	d->pass = (char *)WIFI_PASS;
+void wifi_setconfig(void *data) {
+	struct mg_tcpip_driver_pico_w_data *d = (struct mg_tcpip_driver_pico_w_data *) data;
+	struct mg_wifi_data *wifi = &d->wifi;
+	wifi->ssid = WIZARD_WIFI_NAME;
+	wifi->pass = WIZARD_WIFI_PASS;
+}
+
+static void mif_fn(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
+  	// TODO(): should we include this inside ifp ? add an fn_data ?
+	if (ev == MG_TCPIP_EV_ST_CHG) {
+		MG_INFO(("State change: %u", *(uint8_t *) ev_data));
+	}
+	// After a disconnection (simulation 2/2), you could retry
+    if (ev == MG_TCPIP_EV_ST_CHG && *(uint8_t *) ev_data == MG_TCPIP_STATE_DOWN) {
+        struct mg_wifi_data *wifi = &((struct mg_tcpip_driver_pico_w_data *) ifp->driver_data)->wifi;
+        MG_INFO(("Disconnected"));
+        bool res = mg_wifi_connect(wifi);
+        MG_INFO(("Manually connecting: %s", res ? "OK":"FAIL"));
+	}
 }
 
 /***
@@ -196,11 +207,7 @@ static void one_second_timer(void *arg) {
 static void net_check_timer(void *arg) {
 	/* check state */
 	//MG_INFO(("State: %d", g_mgr.ifp->state));
-	if (g_mgr.ifp->state == MG_TCPIP_STATE_DOWN) {
-		// If interface is down, change it to MG_TCPIP_STATE_REQ, next run of this timer will bring it down and request connection again
-		g_mgr.ifp->state = MG_TCPIP_STATE_REQ;
-		MG_INFO(("State was MG_TCPIP_STATE_DOWN, reset state to MG_TCPIP_STATE_REQ"));
-	} else if (g_mgr.ifp->state == MG_TCPIP_STATE_REQ) {
+	if (g_mgr.ifp->state == MG_TCPIP_STATE_REQ) {
 		// Reset interface status to down, mg_tcpip_poll will cause a reconnect
 		g_mgr.ifp->state = MG_TCPIP_STATE_DOWN;
 		MG_INFO(("State was MG_TCPIP_STATE_REQ, reset state to MG_TCPIP_STATE_DOWN"));
@@ -520,6 +527,23 @@ int main(){
 	
 	// This blocks forever. Call it at the end of main()
 	mg_mgr_init(&g_mgr);      // Initialise event manager
+	// Initialise WiFi creds
+	struct mg_tcpip_driver_pico_w_data driver_data = {
+		.wifi.ssid = WIFI_SSID,
+		.wifi.pass = WIFI_PASS
+	};
+	// Hostname
+	memcpy(g_mgr.ifp->dhcp_name, "water", 6);
+	// Initialise Mongoose network stack
+	// Either set use_dhcp or enter a static config.
+	// For static configuration, specify IP/mask/GW in network byte order
+	struct mg_tcpip_if mif = {
+		.ip = 0,
+		.driver = &mg_tcpip_driver_pico_w,
+		.driver_data = &driver_data,
+		.recv_queue.size = 8192,
+		.fn = mif_fn
+	};
 	mg_log_set(MG_LL_DEBUG);  // Set log level to debug
 	MG_INFO(("Starting HTTP listener"));
 	mg_http_listen(&g_mgr, HTTP_URL, http_ev_handler, NULL);

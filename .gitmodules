@@ -1,0 +1,6 @@
+[submodule "lib/mongoose"]
+	path = lib/mongoose
+	url = https://github.com/cesanta/mongoose
+[submodule "lib/RPIPicoOnboardNVS"]
+	path = lib/RPIPicoOnboardNVS
+	url = https://github.com/jondurrant/RPIPicoOnboardNVS

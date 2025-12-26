@@ -1,4 +1,3 @@
 set(SRC_FILES 
-    ${CMAKE_CURRENT_LIST_DIR}/NVSOnboard.cpp
     ${CMAKE_CURRENT_LIST_DIR}/fs.c
 )

@@ -8,6 +8,7 @@ add_executable(${NAME}
 target_link_libraries(${NAME} 
     pico_stdlib 
     pico_cyw43_arch_none
+    hardware_gpio
     hardware_rtc
     hardware_spi 
     pico_rand 
@@ -15,6 +16,7 @@ target_link_libraries(${NAME}
     hardware_flash 
     pico_bootrom
     mongoose
+    onboard_nvs
 )
 
 # create map/bin/hex file etc.

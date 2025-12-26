@@ -18,6 +18,10 @@ pico_sdk_init()
 SET(MONGOOSE_PATH "${CMAKE_CURRENT_LIST_DIR}/lib/mongoose" CACHE STRING "Common Lib")
 include(mongoose.cmake)
 
+set(NVS_PATH "${CMAKE_CURRENT_LIST_DIR}/lib/RPIPicoOnboardNVS/")
+    message("Using local NVS_PATH '${NVS_PATH}')")
+include(picoOnboardNVS.cmake)
+
 add_subdirectory(src)
 
 #Set up files for the release packages

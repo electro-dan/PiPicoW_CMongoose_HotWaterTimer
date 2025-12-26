@@ -43,5 +43,5 @@
 # build directories
 build
 
-# mongoose folder
-lib/mongoose
+# mongoose pack
+lib/mongoose/test/pack
