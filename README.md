@@ -93,3 +93,5 @@ To see messages via USB serial (via MG_INFO), Linux users can use minicom. Ubunt
     
     minicom -b 115200 -o -D /dev/ttyACM0
 
+Schematic:
+![alt text](HotWater-Pi-Pico-Control-Schematic.png "Hot Water Timer Schematic")
