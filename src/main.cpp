@@ -13,9 +13,10 @@
 #include "pico/util/datetime.h"
 #include <time.h>
 #include "hardware/rtc.h"
-#include "NVSOnboard.h"
 
+#include "NVSOnboard.h"
 #include "mongoose.h"
+
 #include "main.h"
 
 struct mg_mgr g_mgr;
@@ -40,25 +41,18 @@ struct s_status {
 	uint16_t timers[6][3] = {{127, 450, 390},{0, 420, 420},{0, 420, 420},{0, 420, 420},{0, 420, 420},{0, 420, 420}};
 } g_status;
 
-void wifi_setconfig(void *data) {
-	struct mg_tcpip_driver_pico_w_data *d = (struct mg_tcpip_driver_pico_w_data *) data;
-	struct mg_wifi_data *wifi = &d->wifi;
-	wifi->ssid = WIZARD_WIFI_NAME;
-	wifi->pass = WIZARD_WIFI_PASS;
-}
-
 static void mif_fn(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
   	// TODO(): should we include this inside ifp ? add an fn_data ?
 	if (ev == MG_TCPIP_EV_ST_CHG) {
 		MG_INFO(("State change: %u", *(uint8_t *) ev_data));
 	}
-	// After a disconnection (simulation 2/2), you could retry
-    if (ev == MG_TCPIP_EV_ST_CHG && *(uint8_t *) ev_data == MG_TCPIP_STATE_DOWN) {
-        struct mg_wifi_data *wifi = &((struct mg_tcpip_driver_pico_w_data *) ifp->driver_data)->wifi;
-        MG_INFO(("Disconnected"));
-        bool res = mg_wifi_connect(wifi);
-        MG_INFO(("Manually connecting: %s", res ? "OK":"FAIL"));
-	}
+}
+
+void wifi_setconfig(void *data) {
+	struct mg_tcpip_driver_pico_w_data *d = (struct mg_tcpip_driver_pico_w_data *) data;
+	struct mg_wifi_data *wifi = &d->wifi;
+	wifi->ssid = (char *)WIFI_SSID;
+	wifi->pass = (char *)WIFI_PASS;
 }
 
 /***
@@ -182,7 +176,7 @@ static void one_second_timer(void *arg) {
 			MG_INFO(("WS Send"));
 
 			mg_ws_printf(c, WEBSOCKET_OP_TEXT, 
-				"{%m: %m, %m: %d, %m: %d, %m: %d, %m: %d, %m: %d,%m: [[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d]]}\n", 
+				"{%m: %m, %m: %d, %m: %d, %m: %d, %m: %d, %m: %d, %m: [[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d]]}\n", 
 				MG_ESC("status"), MG_ESC("OK"), MG_ESC("current_day"), g_status.current_day, MG_ESC("current_time"), g_status.current_time, 
 				MG_ESC("heating_state"), g_status.heating_state, MG_ESC("is_heating"), g_status.is_heating, 
 				MG_ESC("boost_timer_countdown"), g_status.boost_timer_countdown, MG_ESC("timers"), 
@@ -207,7 +201,13 @@ static void one_second_timer(void *arg) {
 static void net_check_timer(void *arg) {
 	/* check state */
 	//MG_INFO(("State: %d", g_mgr.ifp->state));
-	if (g_mgr.ifp->state == MG_TCPIP_STATE_REQ) {
+	if (g_mgr.ifp->state == MG_TCPIP_STATE_DOWN) {
+		// If interface is down, request connection again
+		struct mg_wifi_data *wifi = &((struct mg_tcpip_driver_pico_w_data *) g_mgr.ifp->driver_data)->wifi;
+        MG_INFO(("Disconnected"));
+        bool res = mg_wifi_connect(wifi);
+        MG_INFO(("Manually connecting: %s", res ? "OK":"FAIL"));
+	} else if (g_mgr.ifp->state == MG_TCPIP_STATE_REQ) {
 		// Reset interface status to down, mg_tcpip_poll will cause a reconnect
 		g_mgr.ifp->state = MG_TCPIP_STATE_DOWN;
 		MG_INFO(("State was MG_TCPIP_STATE_REQ, reset state to MG_TCPIP_STATE_DOWN"));
@@ -257,8 +257,8 @@ static void get_data() {
 		}
 	}
 	if (is_there_data)	{
-		if (nvs->contains("is_heating")) {
-			nvs->get_bool("is_heating", &g_status.is_heating);
+		if (nvs->contains("heating_state")) {
+			nvs->get_bool("heating_state", &g_status.heating_state);
 		}
 		MG_INFO(("Data read from flash"));
 	} else {
@@ -282,7 +282,7 @@ static void save_data() {
 		}
 	}
 	
-	nvs->set_bool("is_heating", g_status.is_heating);
+	nvs->set_bool("heating_state", g_status.heating_state);
 
 	nvs->commit();
 
@@ -363,7 +363,7 @@ static void http_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
 				datetime_t dt;
 				rtc_get_datetime(&dt);
 				mg_http_reply(c, 200, "Content-Type: application/json\r\n", 
-					"{%m: %m, %m: %d, %m: %d, %m: %d, %m: %d, %m: %d,%m: [[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d]]}\n", 
+					"{%m: %m, %m: %d, %m: %d, %m: %d, %m: %d, %m: %d, %m: [[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d],[%d, %d, %d]]}\n", 
 					MG_ESC("status"), MG_ESC("OK"), MG_ESC("current_day"), g_status.current_day, MG_ESC("current_time"), g_status.current_time, 
 					MG_ESC("heating_state"), g_status.heating_state, MG_ESC("is_heating"), g_status.is_heating, 
 					MG_ESC("boost_timer_countdown"), g_status.boost_timer_countdown, MG_ESC("timers"), 
@@ -514,36 +514,25 @@ int main(){
     gpio_init(GPIO_BUTTON_PIN); // Initialise the GPIO pin
     gpio_set_dir(GPIO_BUTTON_PIN, GPIO_IN); // Set it as an input
     gpio_pull_up(GPIO_BUTTON_PIN); // Enable internal pull-up resistor
-
+	
 	// Relay pins
 	gpio_init(GPIO_RELAY_TRIG); // Initialise the GPIO pin
     gpio_set_dir(GPIO_RELAY_TRIG, GPIO_OUT); // Set it as an output
+	gpio_put(GPIO_RELAY_TRIG, 0);
 	gpio_init(GPIO_RELAY_HOLD); // Initialise the GPIO pin
     gpio_set_dir(GPIO_RELAY_HOLD, GPIO_OUT); // Set it as an output
-    
+    gpio_put(GPIO_RELAY_HOLD, 0);
 
 	// do not access the CYW43 LED before Mongoose initializes !
 	MG_INFO(("Hardware initialised, starting firmware..."));
 	
 	// This blocks forever. Call it at the end of main()
 	mg_mgr_init(&g_mgr);      // Initialise event manager
-	// Initialise WiFi creds
-	struct mg_tcpip_driver_pico_w_data driver_data = {
-		.wifi.ssid = WIFI_SSID,
-		.wifi.pass = WIFI_PASS
-	};
-	// Hostname
+
+  	// Host name
 	memcpy(g_mgr.ifp->dhcp_name, "water", 6);
-	// Initialise Mongoose network stack
-	// Either set use_dhcp or enter a static config.
-	// For static configuration, specify IP/mask/GW in network byte order
-	struct mg_tcpip_if mif = {
-		.ip = 0,
-		.driver = &mg_tcpip_driver_pico_w,
-		.driver_data = &driver_data,
-		.recv_queue.size = 8192,
-		.fn = mif_fn
-	};
+	g_mgr.ifp->fn = mif_fn;
+
 	mg_log_set(MG_LL_DEBUG);  // Set log level to debug
 	MG_INFO(("Starting HTTP listener"));
 	mg_http_listen(&g_mgr, HTTP_URL, http_ev_handler, NULL);
