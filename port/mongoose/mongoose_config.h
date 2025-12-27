@@ -10,5 +10,5 @@
 
 
 // Using a custom function:
-extern void main_setconfig(void *data);
-#define MG_SET_WIFI_CONFIG(data) main_setconfig(data)
+extern void wifi_setconfig(void *data);
+#define MG_SET_WIFI_CONFIG(data) wifi_setconfig(data)
