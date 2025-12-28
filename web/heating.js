@@ -1,5 +1,9 @@
 var isChanging = false; // Used to prevent SSE updating controls when being edited
 var ws; // WebSocket
+var wsRetryAttempts = 0;
+var overlay = document.getElementById('overlay');
+const maxRetryAttempts = 5; // Maximum number of retry attempts
+const retryDelay = 1000; // Delay between retries in milliseconds
 
 // https://www.slingacademy.com/article/javascript-checking-if-a-tab-is-currently-focused-active/
 var hidden, visibilityChange;
@@ -19,25 +23,38 @@ function streamStatus() {
     if (!document[hidden]) {
         console.log("Visible");
         if (!ws) {
-            console.log("Open websocket");
+            console.log("Opening websocket...");
             ws = new WebSocket("ws://" + location.host + "/websocket");
+            wsRetryAttempts = 0;
+            overlay.classList.add('hidden'); // Hide overlay
         }
         if (!ws) return;
 
+        ws.onopen = function(ev) {
+            console.log('WebSocket opened');
+        };
         ws.onmessage = function(ev) { 
             updateStatus(ev.data);
         }
-        ws.onerror = function(ev) { 
-            console.log(ev);
+        ws.onerror = function(error) { 
+            console.log('WebSocket error:', error);
+            if (wsRetryAttempts < maxRetryAttempts) {
+                wsRetryAttempts++;
+                console.log('Reconnecting... attempt #' + wsRetryAttempts);
+                setTimeout(streamStatus, retryDelay);
+            }
         }
         ws.onclose = function() { 
-            ws = null; 
+            console.log('WebSocket closed');
+            overlay.classList.remove('hidden'); // Show overlay again
         }
     } else {
         console.log("Hidden");
         if (ws) { 
             ws.close(); 
+            ws = null;
             console.log("Close websocket");
+            overlay.classList.remove('hidden'); // Show overlay again
             return; 
         }
     }
@@ -263,6 +280,7 @@ window.addEventListener('beforeunload', () => {
     if (ws) {
         console.log("Close websocket");
         ws.close();
+        ws = null;
     }
 });
 
