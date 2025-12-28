@@ -143,7 +143,7 @@ static void one_second_timer(void *arg) {
     if (g_status.heating_state) {
 		for (char i = 0; i < 6; i++) {
 			// if timer is enabled for today (bitwise AND)
-			if (g_status.current_day & g_status.timers[i][0]) {
+			if (1 << (g_status.current_day - 1) & g_status.timers[i][0]) {
 				// if the on and off timer are not the same
 				if (g_status.timers[i][1] != g_status.timers[i][2]) {
 					if (g_status.timers[i][1] < g_status.timers[i][2]) {
